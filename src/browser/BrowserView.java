@@ -47,12 +47,18 @@ abstract class BrowserView implements AddonView {
         }
     }
 
-    /** Single-line text input. */
+    /**
+     * Single-line text input with a selection (from {@code anchor} to {@code cursor}): click to place the cursor,
+     * drag or Shift+arrows to select, Ctrl+A/C/X/V, typing replaces the selection.
+     */
     static final class Field {
         final StringBuilder text = new StringBuilder();
         int cursor;
+        int anchor;
         final int max;
         final String placeholder;
+        /** Screen x of each cursor position as last drawn (for clicks); null before the first frame. */
+        int[] xs;
 
         Field(int max, String placeholder) {
             this.max = max;
@@ -62,33 +68,115 @@ abstract class BrowserView implements AddonView {
         Field set(String s) {
             text.setLength(0);
             cursor = 0;
+            anchor = 0;
             insert(s == null ? "" : s);
             return this;
         }
 
+        boolean hasSelection() {
+            return anchor != cursor;
+        }
+
+        int selStart() {
+            return Math.min(anchor, cursor);
+        }
+
+        int selEnd() {
+            return Math.max(anchor, cursor);
+        }
+
+        String selected() {
+            return text.substring(selStart(), selEnd());
+        }
+
+        void deleteSelection() {
+            if (hasSelection()) {
+                int s = selStart();
+                text.delete(s, selEnd());
+                cursor = s;
+                anchor = s;
+            }
+        }
+
         void insert(String s) {
+            deleteSelection();
             for (int i = 0; i < s.length() && text.length() < max; i++) {
                 char c = s.charAt(i);
                 if (c >= 32 && c != 127 && c != '§') {
                     text.insert(cursor++, c);
                 }
             }
+            anchor = cursor;
         }
 
         void backspace(boolean word) {
-            int from = cursor;
-            if (word) {
-                while (from > 0 && text.charAt(from - 1) == ' ') {
-                    from--;
-                }
-                while (from > 0 && text.charAt(from - 1) != ' ') {
-                    from--;
-                }
-            } else if (from > 0) {
-                from--;
+            if (hasSelection()) {
+                deleteSelection();
+                return;
             }
+            int from = word ? wordLeft() : Math.max(0, cursor - 1);
             text.delete(from, cursor);
             cursor = from;
+            anchor = from;
+        }
+
+        void delete(boolean word) {
+            if (hasSelection()) {
+                deleteSelection();
+                return;
+            }
+            int to = word ? wordRight() : Math.min(text.length(), cursor + 1);
+            text.delete(cursor, to);
+            anchor = cursor;
+        }
+
+        /** Moves the cursor; with {@code select} the selection grows, otherwise it is dropped. */
+        void move(int to, boolean select) {
+            cursor = Math.max(0, Math.min(text.length(), to));
+            if (!select) {
+                anchor = cursor;
+            }
+        }
+
+        int wordLeft() {
+            int i = cursor;
+            while (i > 0 && text.charAt(i - 1) == ' ') {
+                i--;
+            }
+            while (i > 0 && text.charAt(i - 1) != ' ') {
+                i--;
+            }
+            return i;
+        }
+
+        int wordRight() {
+            int i = cursor;
+            while (i < text.length() && text.charAt(i) == ' ') {
+                i++;
+            }
+            while (i < text.length() && text.charAt(i) != ' ') {
+                i++;
+            }
+            return i;
+        }
+
+        void selectAll() {
+            anchor = 0;
+            cursor = text.length();
+        }
+
+        /** Cursor position closest to the screen x of a click. */
+        int indexAt(double x) {
+            if (xs == null) {
+                return text.length();
+            }
+            int best = 0;
+            for (int i = 1; i < xs.length; i++) {
+                if (Math.abs(xs[i] - x) < Math.abs(xs[best] - x)) {
+                    best = i;
+                }
+            }
+            return Math.min(best, text.length());
         }
 
         String value() {
@@ -278,8 +366,24 @@ abstract class BrowserView implements AddonView {
             int index = i;
             int rowsBefore = hits.size();
             drawRow(g, i, x + 4, ry, rowW, ROW_H, hover, mx, my);
-            // row buttons were added by drawRow; the row click goes below them
-            hits.add(rowsBefore, new Hit(x + 4, Math.max(ry, y + 4), x + 4 + rowW, Math.min(ry + ROW_H, y + h - 4), () -> clickRow(index)));
+            // buttons of a row that is partly scrolled out only count inside the list, never over the toolbar or
+            // the bottom bar
+            int top = y + 4;
+            int bottom = y + h - 4;
+            for (int k = hits.size() - 1; k >= rowsBefore; k--) {
+                Hit b = hits.get(k);
+                int y1 = Math.max(b.y1(), top);
+                int y2 = Math.min(b.y2(), bottom);
+                if (y1 >= y2) {
+                    hits.remove(k);
+                } else {
+                    hits.set(k, new Hit(b.x1(), y1, b.x2(), y2, b.action()));
+                }
+            }
+            // the row click goes below its buttons
+            if (Math.max(ry, top) < Math.min(ry + ROW_H, bottom)) {
+                hits.add(rowsBefore, new Hit(x + 4, Math.max(ry, top), x + 4 + rowW, Math.min(ry + ROW_H, bottom), () -> clickRow(index)));
+            }
         }
         g.disableScissor();
         if (bar) {
@@ -414,16 +518,50 @@ abstract class BrowserView implements AddonView {
             if (blink) {
                 g.fill(tx, ty - 1, tx + 1, ty + 9, TEXT);
             }
+            f.xs = new int[]{tx};
         } else {
             int cw = g.textWidth(f.text.substring(0, f.cursor));
             int shift = Math.max(0, cw - room);
+            int[] xs = new int[f.text.length() + 1];
+            for (int i = 0; i <= f.text.length(); i++) {
+                xs[i] = tx - shift + (i == f.cursor ? cw : g.textWidth(f.text.substring(0, i)));
+            }
+            f.xs = xs;
+            if (f.hasSelection()) {
+                g.fill(xs[f.selStart()], ty - 1, xs[f.selEnd()], ty + 9, focused ? 0xA08B5CF6 : 0x608B5CF6);
+            }
             g.text(f.value(), tx - shift, ty, TEXT, false);
-            if (blink) {
+            if (blink && !f.hasSelection()) {
                 g.fill(tx - shift + cw, ty - 1, tx - shift + cw + 1, ty + 9, TEXT);
             }
         }
         g.disableScissor();
-        hits.add(new Hit(x, y, x + w, y + h, onFocus));
+        hits.add(new Hit(x, y, x + w, y + h, () -> {
+            onFocus.run();
+            pressField(f);
+        }));
+    }
+
+    // --- mouse in text fields ---
+
+    private double pressX;
+    private Field dragField;
+    private Field lastPressed;
+    private long lastPressTime;
+
+    /** Click in a field: place the cursor, double click selects everything. */
+    private void pressField(Field f) {
+        long now = System.currentTimeMillis();
+        if (f == lastPressed && now - lastPressTime < 350) {
+            f.selectAll();
+            lastPressed = null;
+            dragField = null;
+            return;
+        }
+        f.move(f.indexAt(pressX), false);
+        lastPressed = f;
+        lastPressTime = now;
+        dragField = f;
     }
 
     static String fit(HudGraphics g, String s, int max) {
@@ -472,6 +610,8 @@ abstract class BrowserView implements AddonView {
         int x = (width - w) / 2;
         int y = (height - h) / 2;
         g.card(x, y, w, h, 7, 0xFA17131F, BORDER);
+        // the dialog itself swallows clicks that hit nothing in it; added first, so its fields and buttons win
+        hits.add(new Hit(x, y, x + w, y + h, () -> { }));
         g.text("§l" + d.title, x + 12, y + 12, TEXT, false);
         int cy = y + 28;
         for (String line : msg) {
@@ -495,7 +635,6 @@ abstract class BrowserView implements AddonView {
         int by = y + h - 28;
         button(g, x + 12, by, bw, 20, t("Abbrechen", "Cancel"), Style.SECONDARY, mx, my, this::closeDialog);
         button(g, x + w - 12 - bw, by, bw, 20, d.okLabel, d.danger ? Style.DANGER : Style.PRIMARY, mx, my, () -> d.onOk.accept(d));
-        hits.add(new Hit(x, y, x + w, y + h, () -> { }));
     }
 
     static List<String> wrap(HudGraphics g, String text, int max) {
@@ -523,6 +662,7 @@ abstract class BrowserView implements AddonView {
         if (button != 0) {
             return false;
         }
+        pressX = x;
         for (int i = hits.size() - 1; i >= 0; i--) {
             Hit h = hits.get(i);
             if (h.contains(x, y)) {
@@ -547,12 +687,18 @@ abstract class BrowserView implements AddonView {
             scroll = Math.max(0, Math.min(maxScroll, (y - listTop - 4) / trackH * maxScroll));
             return true;
         }
+        if (dragField != null && dragField == focus) {
+            dragField.move(dragField.indexAt(x), true); // select by dragging
+            lastPressed = null; // a drag is no first click of a double click
+            return true;
+        }
         return false;
     }
 
     @Override
     public boolean mouseReleased(double x, double y, int button) {
         draggingBar = false;
+        dragField = null;
         return false;
     }
 
@@ -611,26 +757,33 @@ abstract class BrowserView implements AddonView {
         }
         switch (key) {
             case Keys.BACKSPACE -> f.backspace(ctrl);
-            case Keys.DELETE -> {
-                if (f.cursor < f.text.length()) {
-                    f.text.deleteCharAt(f.cursor);
+            case Keys.DELETE -> f.delete(ctrl);
+            case Keys.LEFT -> f.move(ctrl ? f.wordLeft() : !shift && f.hasSelection() ? f.selStart() : f.cursor - 1, shift);
+            case Keys.RIGHT -> f.move(ctrl ? f.wordRight() : !shift && f.hasSelection() ? f.selEnd() : f.cursor + 1, shift);
+            case Keys.HOME -> f.move(0, shift);
+            case Keys.END -> f.move(f.text.length(), shift);
+            case Keys.A -> {
+                if (!ctrl) {
+                    return false;
+                }
+                f.selectAll();
+            }
+            case Keys.C, Keys.X -> {
+                if (!ctrl) {
+                    return false;
+                }
+                if (f.hasSelection()) {
+                    platform.views().setClipboard(f.selected());
+                    if (key == Keys.X) {
+                        f.deleteSelection();
+                    }
                 }
             }
-            case Keys.LEFT -> f.cursor = Math.max(0, f.cursor - 1);
-            case Keys.RIGHT -> f.cursor = Math.min(f.text.length(), f.cursor + 1);
-            case Keys.HOME -> f.cursor = 0;
-            case Keys.END -> f.cursor = f.text.length();
             case Keys.V -> {
                 if (!ctrl) {
                     return false;
                 }
                 f.insert(platform.views().clipboard().replace('\n', ' ').replace('\r', ' '));
-            }
-            case Keys.A -> {
-                if (!ctrl) {
-                    return false;
-                }
-                f.cursor = f.text.length();
             }
             default -> {
                 return false;

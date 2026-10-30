@@ -36,6 +36,7 @@ final class McBrowsers implements BrowserPlatform {
     public void playWorld(String folder, String name) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.getCurrentSave().levelExists(folder)) {
+            mc.setScreen(null); // like vanilla's world list: close the menu first, then start the world
             mc.startIntegratedServer(folder, name, null);
         }
     }

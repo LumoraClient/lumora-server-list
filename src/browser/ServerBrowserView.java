@@ -22,8 +22,8 @@ import java.util.concurrent.ExecutorService;
 public final class ServerBrowserView extends BrowserView {
     private static final ExecutorService PINGS = Icons.pool("Lumora server ping", 6);
     private static final int ICON = 24;
-    private static boolean onlineOnly;
-    private static boolean compatibleOnly;
+    static boolean onlineOnly;
+    static boolean compatibleOnly;
     private static String lastDirect = "";
 
     private final Servers servers;
